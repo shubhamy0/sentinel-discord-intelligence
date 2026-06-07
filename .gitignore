@@ -21,3 +21,6 @@ build/*
 dist/*
 uv.lock*
 pylock*.toml
+*.db
+*.db-wal
+*.db-shm

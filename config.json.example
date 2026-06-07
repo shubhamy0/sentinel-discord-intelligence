@@ -1,0 +1,7 @@
+{
+  "token": "YOUR_DISCORD_TOKEN_HERE",
+  "prefix": "/",
+  "db_path": "activity_tracker.db",
+  "ignore_bots": true,
+  "presence_log_channel_id": null
+}

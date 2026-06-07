@@ -1,0 +1,7 @@
+# No external database dependencies are required.
+# The activity tracking module uses Python's built-in sqlite3 module.
+# To handle database requests asynchronously without blocking the event loop,
+# we use asyncio.to_thread (natively available in Python 3.9+).
+#
+# If you plan to load tokens from .env, python-dotenv can be used:
+python-dotenv>=1.0.0
