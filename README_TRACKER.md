@@ -79,6 +79,34 @@ All commands can be invoked using your configured prefix (default: `/`).
 - `[prefix]stats <user>`: Displays peak usage hours, peak weekdays, averages, and a visual ASCII heatmap of their activity.
 - `[prefix]topactive`: Displays the guild's activity leaderboard of the top 10 most active members.
 - `[prefix]presence <user>`: Displays a detailed formatted history of the target user's recent status changes.
+- `[prefix]purgeme <channel_id_or_here> [limit] [edit_first] [search]`: Deletes your own messages in a target channel (by ID or typing `here`).
+- `[prefix]purgeserverme <server_id_or_here> [limit_per_channel] [edit_first] [search]`: Deletes your own messages across all accessible text channels in a target server.
+
+---
+
+## Stealth Purging (DM Mode)
+
+To avoid sending command messages (like `/purgeme`) in public channels where other users or logging bots can see them, you can send these commands in a private Direct Message (DM) to your own self-bot:
+
+1. **Purging a specific channel privately:**
+   Send this in DMs to yourself:
+   ```
+   /purgeme 123456789012345678 150
+   ```
+   *This will delete up to 150 of your messages in channel ID `123456789012345678`.*
+
+2. **Purging a whole server privately:**
+   Send this in DMs to yourself:
+   ```
+   /purgeserverme 987654321098765432 50
+   ```
+   *This will scan all text channels in server ID `987654321098765432` and delete up to 50 of your messages per channel.*
+
+### Settings:
+- `edit_first` (True/False, default False): If set to `True`, the bot will edit each message to `.` before deleting it, confusing logging bots' message caches.
+- `search` (Optional): Specifying a keyword at the end will restrict deletions only to messages containing that word.
+- **Stealth Delay**: The bot automatically applies a randomized delay between 2.0s and 3.0s between each deletion to bypass anti-spam filters and avoid rate limits.
+- **Private Reporting**: The bot reports start status and final completion summaries privately to you in your DMs.
 
 ---
 

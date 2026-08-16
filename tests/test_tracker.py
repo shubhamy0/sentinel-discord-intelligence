@@ -10,19 +10,21 @@ import tempfile
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Generator
+from unittest.mock import MagicMock, AsyncMock, patch
 
 
-from discord.ext.tracker.db import (
+from sentinel.tracker.db import (
     init_db_sync,
     log_message_sync,
     log_voice_join_sync,
     log_voice_leave_sync,
     fetch_db_user_sync,
     find_user_by_name_sync,
-    log_presence_change_sync
+    log_presence_change_sync,
+    fetch_messages_for_user_sync,
 )
-from discord.ext.tracker.analytics import AnalyticsEngine
-from discord.ext.tracker.cog import format_duration, draw_ascii_heatmap
+from sentinel.tracker.analytics import AnalyticsEngine
+from sentinel.tracker.cog import format_duration, draw_ascii_heatmap
 
 
 class TestActivityTracker(unittest.TestCase):
@@ -63,7 +65,7 @@ class TestActivityTracker(unittest.TestCase):
         """Test logging messages and ensuring duplicates are ignored."""
         timestamp = datetime.now(timezone.utc).isoformat()
         
-        # Log message for a new user
+        # Log message for a new user — include Sentinel content fields
         log_message_sync(
             self.db_path,
             message_id=12345,
@@ -71,7 +73,9 @@ class TestActivityTracker(unittest.TestCase):
             username="TestUser#0001",
             timestamp=timestamp,
             guild_id=111,
-            channel_id=222
+            channel_id=222,
+            content="Hello, world!",
+            message_url="https://discord.com/channels/111/222/12345",
         )
         
         # Verify user was created
@@ -80,7 +84,7 @@ class TestActivityTracker(unittest.TestCase):
         self.assertEqual(user["username"], "TestUser#0001")
         self.assertEqual(user["last_seen"], timestamp)
         
-        # Verify message was logged
+        # Verify message was logged with content and URL
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -90,8 +94,11 @@ class TestActivityTracker(unittest.TestCase):
         self.assertEqual(row["user_id"], 999)
         self.assertEqual(row["guild_id"], 111)
         self.assertEqual(row["channel_id"], 222)
+        # Sentinel fields
+        self.assertEqual(row["content"], "Hello, world!")
+        self.assertEqual(row["message_url"], "https://discord.com/channels/111/222/12345")
         
-        # Try logging duplicate message ID - should be ignored
+        # Try logging duplicate message ID — should be ignored
         log_message_sync(
             self.db_path,
             message_id=12345,
@@ -106,7 +113,92 @@ class TestActivityTracker(unittest.TestCase):
         count = cursor.fetchone()["count"]
         self.assertEqual(count, 1) # count should still be 1
         
+        # Verify backward-compat: logging without content/URL still works (defaults to None)
+        log_message_sync(
+            self.db_path,
+            message_id=99999,
+            user_id=999,
+            username="TestUser#0001",
+            timestamp=timestamp,
+            guild_id=111,
+            channel_id=222,
+        )
+        cursor.execute("SELECT content, message_url FROM message_activity WHERE message_id = 99999")
+        compat_row = cursor.fetchone()
+        self.assertIsNotNone(compat_row)
+        self.assertIsNone(compat_row["content"])
+        self.assertIsNone(compat_row["message_url"])
+        
         conn.close()
+
+    def test_fetch_messages_for_user(self) -> None:
+        """Test Sentinel's per-user per-guild message retrieval helper."""
+        ts_base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        # Insert 3 messages for user 1 in guild 111 across two channels
+        for i in range(3):
+            ts = (ts_base.replace(minute=i)).isoformat()
+            log_message_sync(
+                self.db_path,
+                message_id=1000 + i,
+                user_id=1,
+                username="Alice",
+                timestamp=ts,
+                guild_id=111,
+                channel_id=100 + i,
+                content=f"Message {i}",
+                message_url=f"https://discord.com/channels/111/{100 + i}/{1000 + i}",
+            )
+
+        # Insert 1 message for user 2 in guild 111 (should NOT appear in user 1 results)
+        log_message_sync(
+            self.db_path,
+            message_id=2000,
+            user_id=2,
+            username="Bob",
+            timestamp=ts_base.isoformat(),
+            guild_id=111,
+            channel_id=100,
+            content="Bob's message",
+        )
+
+        # Insert 1 message for user 1 in a different guild (should NOT appear)
+        log_message_sync(
+            self.db_path,
+            message_id=3000,
+            user_id=1,
+            username="Alice",
+            timestamp=ts_base.isoformat(),
+            guild_id=999,
+            channel_id=100,
+            content="Alice in another server",
+        )
+
+        # --- Fetch all messages for user 1 in guild 111 ---
+        rows = fetch_messages_for_user_sync(self.db_path, user_id=1, guild_id=111)
+        self.assertEqual(len(rows), 3, "Should return exactly 3 messages for user 1 in guild 111")
+
+        # Verify ordering is oldest-first
+        timestamps = [r["timestamp"] for r in rows]
+        self.assertEqual(timestamps, sorted(timestamps), "Rows should be ordered oldest-first")
+
+        # Verify content and URL are present
+        for i, row in enumerate(rows):
+            self.assertEqual(row["content"], f"Message {i}")
+            self.assertIn("discord.com", row["message_url"])
+
+        # --- Test limit parameter ---
+        rows_limited = fetch_messages_for_user_sync(self.db_path, user_id=1, guild_id=111, limit=2)
+        self.assertEqual(len(rows_limited), 2, "limit parameter should be respected")
+
+        # --- Verify cross-guild isolation ---
+        rows_other_guild = fetch_messages_for_user_sync(self.db_path, user_id=1, guild_id=999)
+        self.assertEqual(len(rows_other_guild), 1)
+        self.assertEqual(rows_other_guild[0]["content"], "Alice in another server")
+
+        # --- Verify empty result for unknown user ---
+        rows_unknown = fetch_messages_for_user_sync(self.db_path, user_id=9999, guild_id=111)
+        self.assertEqual(rows_unknown, [])
 
     def test_username_lookup(self) -> None:
         """Test looking up user records by matching username substring."""
@@ -213,31 +305,31 @@ class TestActivityTracker(unittest.TestCase):
         log_voice_join_sync(self.db_path, 888, "UserB", 111, 222, "2026-06-05T09:00:00+00:00")
         log_voice_leave_sync(self.db_path, 888, "UserB", 111, 222, "2026-06-05T09:30:00+00:00")
         
-        # Run Analytics checks (synchronously using asyncio thread runners or calling sync versions)
+        # Run Analytics checks using asyncio.run() — compatible with Python 3.12
+        # (asyncio.get_event_loop() raises RuntimeError on 3.12 when no loop exists)
         # Test active hour (should be 14 UTC)
-        loop = asyncio.get_event_loop()
-        hr_data = loop.run_until_complete(self.analytics.get_most_active_hour(999))
+        hr_data = asyncio.run(self.analytics.get_most_active_hour(999))
         self.assertIsNotNone(hr_data)
         self.assertEqual(hr_data[0], 14) # peak hour is 14
         
         # Test active day (should be 1 = Monday)
-        day_data = loop.run_until_complete(self.analytics.get_most_active_day(999))
+        day_data = asyncio.run(self.analytics.get_most_active_day(999))
         self.assertIsNotNone(day_data)
         self.assertEqual(day_data[0], 1) # peak day is 1 (Monday)
         
         # Test voice duration
-        voice_dur_a = loop.run_until_complete(self.analytics.get_voice_duration(999))
-        voice_dur_b = loop.run_until_complete(self.analytics.get_voice_duration(888))
+        voice_dur_a = asyncio.run(self.analytics.get_voice_duration(999))
+        voice_dur_b = asyncio.run(self.analytics.get_voice_duration(888))
         self.assertEqual(voice_dur_a, 600.0)
         self.assertEqual(voice_dur_b, 1800.0)
         
         # Test daily averages for UserA (4 messages across 2 active days -> average 2.0 messages/day)
-        averages = loop.run_until_complete(self.analytics.get_average_daily_activity(999))
+        averages = asyncio.run(self.analytics.get_average_daily_activity(999))
         self.assertEqual(averages["avg_messages"], 2.0)
         self.assertEqual(averages["avg_voice_duration"], 600.0) # 600s voice on 1 active voice day
         
         # Test Top Active Leaderboard
-        top_users = loop.run_until_complete(self.analytics.get_top_active_users(limit=10))
+        top_users = asyncio.run(self.analytics.get_top_active_users(limit=10))
         self.assertEqual(len(top_users), 2)
         # UserA has score: 4 messages + 10m voice = 14
         # UserB has score: 0 messages + 30m voice = 30
@@ -251,8 +343,7 @@ class TestActivityTracker(unittest.TestCase):
         log_message_sync(self.db_path, 1, 999, "UserA", "2026-06-01T14:00:00+00:00", 111, 222)
         log_message_sync(self.db_path, 2, 999, "UserA", "2026-06-02T15:00:00+00:00", 111, 222)
         
-        loop = asyncio.get_event_loop()
-        heatmap_data = loop.run_until_complete(self.analytics.get_heatmap_data(999))
+        heatmap_data = asyncio.run(self.analytics.get_heatmap_data(999))
         ascii_grid = draw_ascii_heatmap(heatmap_data)
         
         # Verify formatting features are present
@@ -324,7 +415,7 @@ class TestActivityTracker(unittest.TestCase):
         self.assertIsNone(dur_dup)
         
         # Fetch recent presence records and check order and values
-        from discord.ext.tracker.db import fetch_recent_presence_sync
+        from sentinel.tracker.db import fetch_recent_presence_sync
         records = fetch_recent_presence_sync(self.db_path, 999, limit=10)
         self.assertEqual(len(records), 3) # dup should be ignored
         
@@ -342,6 +433,18 @@ class TestActivityTracker(unittest.TestCase):
         self.assertIsNone(records[2]["duration"])
 
 
+
+class TestConfigLoading(unittest.TestCase):
+    @patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "token_from_env"}, clear=True)
+    def test_load_config_env_precedence(self) -> None:
+        """Verify environment variable DISCORD_BOT_TOKEN takes precedence over config.json."""
+        from bot import load_config
+        config = load_config()
+        self.assertEqual(config["token"], "token_from_env")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
 

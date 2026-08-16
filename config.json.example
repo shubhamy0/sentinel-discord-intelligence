@@ -1,5 +1,5 @@
 {
-  "token": "YOUR_DISCORD_TOKEN_HERE",
+  "token": "YOUR_DISCORD_BOT_TOKEN_HERE",
   "prefix": "/",
   "db_path": "activity_tracker.db",
   "ignore_bots": true,
